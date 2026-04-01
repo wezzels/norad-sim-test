@@ -4,5 +4,9 @@
 pytest>=7.0.0
 pytest-cov>=4.0.0
 
+# Video recording (optional - for test video generation)
+matplotlib>=3.5.0
+numpy>=1.20.0
+
 # No external dependencies - pure Python implementation
 # Compatible with Python 3.8+

@@ -6,9 +6,11 @@ import json
 from pathlib import Path
 
 from simulator import GameState, DefenseManager, DetectionManager, ScenarioLoader, HumanPlayer
+from simulator.video_recorder import VideoRecorder, RecordingConfig, TestRecorder
 
 
-def run_simulation(scenario_id: str = "tutorial", verbose: bool = False, human_mode: bool = True):
+def run_simulation(scenario_id: str = "tutorial", verbose: bool = False, human_mode: bool = True,
+                   record: bool = False, output_dir: str = "recordings"):
     """
     Run a simulation.
     
@@ -16,6 +18,8 @@ def run_simulation(scenario_id: str = "tutorial", verbose: bool = False, human_m
         scenario_id: Scenario to run
         verbose: Print detailed output
         human_mode: Use human-like AI player
+        record: Record video of simulation
+        output_dir: Output directory for recordings
     """
     # Initialize
     game_state = GameState()
@@ -24,6 +28,13 @@ def run_simulation(scenario_id: str = "tutorial", verbose: bool = False, human_m
     defense_manager = DefenseManager(game_state)
     detection_manager = DetectionManager()
     scenario_loader = ScenarioLoader()
+    
+    # Video recorder
+    recorder = None
+    if record:
+        config = RecordingConfig(output_dir=output_dir)
+        recorder = VideoRecorder(config)
+        recorder.start_recording(scenario_id)
     
     # Create human player if requested
     player = None
@@ -87,14 +98,20 @@ def run_simulation(scenario_id: str = "tutorial", verbose: bool = False, human_m
                       f"Detected by {det['satellite']}: {det['missile_id']}")
         
         # Human player makes decisions
+        events = []
         if player:
             actions = player.update(delta)
             for action in actions:
                 actions_taken.append(action)
+                events.append(action)
                 if verbose:
                     print(f"[{game_state.simulation_time:.1f}s] "
                           f"Launched {action['interceptor_type']} at {action['missile_id'][:15]}... "
                           f"(reaction: {action['reaction_time']:.2f}s, stress: {action['stress']:.2f})")
+        
+        # Record frame
+        if recorder:
+            recorder.capture_frame(game_state, events)
         
         # Update game state
         game_state.update(delta)
@@ -110,6 +127,11 @@ def run_simulation(scenario_id: str = "tutorial", verbose: bool = False, human_m
         # Increment frame
         frame_count += 1
     
+    # Stop recording
+    video_path = None
+    if recorder:
+        video_path = recorder.stop_recording()
+    
     # Results
     results = {
         "scenario": scenario_id,
@@ -120,7 +142,8 @@ def run_simulation(scenario_id: str = "tutorial", verbose: bool = False, human_m
         "final_defcon": game_state.current_defcon,
         "simulation_time": game_state.simulation_time,
         "interceptors_remaining": defense_manager.get_inventory_status(),
-        "player_stats": player.get_stats() if player else None
+        "player_stats": player.get_stats() if player else None,
+        "video_path": video_path
     }
     
     if verbose:
@@ -133,6 +156,8 @@ def run_simulation(scenario_id: str = "tutorial", verbose: bool = False, human_m
         print(f"Cities Hit: {results['cities_hit']}")
         print(f"Final DEFCON: {results['final_defcon']}")
         print(f"Simulation Time: {results['simulation_time']:.1f}s")
+        if video_path:
+            print(f"Video: {video_path}")
         if player:
             print(f"\nPlayer Stats:")
             print(f"  Games Played: {player.memory.games_played + 1}")
@@ -154,6 +179,8 @@ def main():
     parser.add_argument("--human-mode", action="store_true", default=True, help="Use human-like AI")
     parser.add_argument("--list-scenarios", "-l", action="store_true", help="List available scenarios")
     parser.add_argument("--runs", "-n", type=int, default=1, help="Number of runs")
+    parser.add_argument("--record", "-r", action="store_true", help="Record video of simulation")
+    parser.add_argument("--output-dir", "-o", default="recordings", help="Output directory for recordings")
     
     args = parser.parse_args()
     
@@ -183,7 +210,9 @@ def main():
         results = run_simulation(
             scenario_id=args.scenario,
             verbose=args.verbose,
-            human_mode=args.human_mode
+            human_mode=args.human_mode,
+            record=args.record,
+            output_dir=args.output_dir
         )
         
         if results:
