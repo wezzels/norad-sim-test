@@ -170,6 +170,8 @@ class TestInterceptorSelection:
         # ICBM - should use GBI
         icbm = defense.game_state.launch_missile("Site", "City", "ICBM")
         priorities = defense.assess_interceptor_priority(icbm)
+        # priorities is a list of (type, priority) tuples
+        assert len(priorities) > 0
         assert priorities[0][0] == "GBI"  # Best choice first
     
     def test_range_limitation(self, defense):

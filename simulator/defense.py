@@ -95,8 +95,15 @@ class DefenseManager:
         """Reset or customize interceptor inventory."""
         if custom_inventory:
             for name, counts in custom_inventory.items():
-                self.inventory[name] = InterceptorType.create(name, counts.get("total", 0))
-                self.inventory[name].available = counts.get("available", counts.get("total", 0))
+                # Handle both dict and int formats
+                if isinstance(counts, int):
+                    total = counts
+                    available = counts
+                else:
+                    total = counts.get("total", 0)
+                    available = counts.get("available", total)
+                self.inventory[name] = InterceptorType.create(name, total)
+                self.inventory[name].available = available
         else:
             self._initialize_inventory()
     
