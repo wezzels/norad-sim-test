@@ -1,0 +1,8 @@
+# Requirements for NORAD War Simulator Test Suite
+
+# Core dependencies
+pytest>=7.0.0
+pytest-cov>=4.0.0
+
+# No external dependencies - pure Python implementation
+# Compatible with Python 3.8+
