@@ -70,7 +70,9 @@ class TestBallistics:
         # Midcourse = peak altitude
         alt = Ballistics.altitude_at_fraction(0.5, 1200, 10000)
         assert isinstance(alt, (int, float)), f"Expected real number, got {type(alt)}"
-        assert 800 < alt < 1200, f"Expected near peak at midcourse, got {alt}"
+        # Altitude at 0.5 fraction should be near max (apogee is around 0.5)
+        assert alt >= 800, f"Expected high altitude at midcourse, got {alt}"
+        assert alt <= 1200, f"Expected altitude <= max_altitude, got {alt}"
     
     def test_calculate_flight_time(self):
         """Test flight time calculation."""
