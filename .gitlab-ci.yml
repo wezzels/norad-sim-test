@@ -1,0 +1,150 @@
+# GitLab CI/CD Pipeline for norad-sim-test
+# Runs tests on every push and merge request
+
+stages:
+  - test
+  - report
+  - deploy
+
+variables:
+  PYTHON_VERSION: "3.12"
+  PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
+
+# Cache pip packages between runs
+cache:
+  paths:
+    - .cache/pip
+    - venv/
+
+# Test job - runs on every push
+test:
+  stage: test
+  image: python:${PYTHON_VERSION}
+  before_script:
+    - pip install --upgrade pip
+    - pip install virtualenv
+    - virtualenv venv
+    - source venv/bin/activate
+    - pip install pytest pytest-cov pytest-html
+  script:
+    - pytest tests/ -v --tb=short --cov=simulator --cov-report=xml --cov-report=html --html=report.html --self-contained-html
+  coverage: '/TOTAL.+?(\d+%)$/'
+  artifacts:
+    paths:
+      - report.html
+      - htmlcov/
+      - coverage.xml
+    reports:
+      coverage_report:
+        coverage_format: cobertura
+        path: coverage.xml
+    expire_in: 30 days
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == "main"
+    - if: $CI_COMMIT_TAG
+
+# Lint job - code quality checks
+lint:
+  stage: test
+  image: python:${PYTHON_VERSION}
+  before_script:
+    - pip install flake8 pylint black isort mypy
+  script:
+    - flake8 simulator/ tests/ --max-line-length=100 --exclude=venv,.venv,__pycache__
+    - black --check simulator/ tests/ --line-length 100
+    - isort --check-only --diff simulator/ tests/
+  allow_failure: true
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+
+# Type checking
+typecheck:
+  stage: test
+  image: python:${PYTHON_VERSION}
+  before_script:
+    - pip install mypy
+  script:
+    - mypy simulator/ --ignore-missing-imports || true
+  allow_failure: true
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+
+# Security scanning
+security:
+  stage: test
+  image: python:${PYTHON_VERSION}
+  before_script:
+    - pip install bandit safety
+  script:
+    - bandit -r simulator/ -f json -o bandit-report.json || true
+    - safety check --json || true
+  allow_failure: true
+  artifacts:
+    paths:
+      - bandit-report.json
+    expire_in: 30 days
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+
+# Generate test report
+report:
+  stage: report
+  image: python:${PYTHON_VERSION}
+  needs:
+    - test
+  script:
+    - echo "Test report generated"
+  artifacts:
+    paths:
+      - report.html
+      - htmlcov/
+    expire_in: 30 days
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+
+# Pages deployment (test coverage report)
+pages:
+  stage: deploy
+  needs:
+    - test
+  script:
+    - mkdir -p public
+    - cp -r htmlcov/* public/ || true
+    - cp report.html public/index.html || true
+  artifacts:
+    paths:
+      - public
+    expire_in: 30 days
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+
+# Release job - create tag on main
+release:
+  stage: deploy
+  image: python:${PYTHON_VERSION}
+  needs:
+    - test
+  script:
+    - echo "Creating release for $CI_COMMIT_TAG"
+  rules:
+    - if: $CI_COMMIT_TAG
+  release:
+    name: 'Release $CI_COMMIT_TAG'
+    description: 'Release $CI_COMMIT_TAG of norad-sim-test'
+    tag_name: '$CI_COMMIT_TAG'
+    ref: '$CI_COMMIT_SHA'
+
+# Scheduled test runs (nightly)
+nightly:
+  stage: test
+  image: python:${PYTHON_VERSION}
+  before_script:
+    - pip install --upgrade pip pytest pytest-cov
+    - virtualenv venv
+    - source venv/bin/activate
+    - pip install -r requirements.txt || pip install pytest
+  script:
+    - pytest tests/ -v --tb=short
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
