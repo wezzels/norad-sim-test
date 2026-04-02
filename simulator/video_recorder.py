@@ -8,18 +8,17 @@ import os
 import subprocess
 import tempfile
 import time
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from datetime import datetime
-import json
 
 try:
     import matplotlib
     matplotlib.use('Agg')  # Non-interactive backend
     import matplotlib.pyplot as plt
-    from matplotlib.patches import Circle, FancyArrowPatch
-    from matplotlib.collections import PathCollection
+    from matplotlib.patches import Polygon as MplPolygon
     import numpy as np
     HAS_MATPLOTLIB = True
 except ImportError:
@@ -43,6 +42,7 @@ class RecordingConfig:
     highlight_interceptions: bool = True
     compression: str = "medium"  # low, medium, high
     realtime_playback: bool = False  # True = 1 sim second = 1 video second
+    geojson_path: str = ""  # Path to world GeoJSON (auto-detected if empty)
 
 
 @dataclass
@@ -52,6 +52,86 @@ class Frame:
     simulation_time: float
     game_state: Dict
     events: List[Dict] = field(default_factory=list)
+
+
+class WorldMap:
+    """Loads and renders world map from GeoJSON."""
+    
+    def __init__(self, geojson_path: Optional[str] = None):
+        self.countries = []
+        self.loaded = False
+        
+        # Try to find GeoJSON file
+        search_paths = [
+            geojson_path,
+            "/home/wez/stsgym-work/stsgym-maps/data/world.json",
+            "data/world.json",
+            "../stsgym-maps/data/world.json",
+        ]
+        
+        for path in search_paths:
+            if path and os.path.exists(path):
+                self._load_geojson(path)
+                break
+    
+    def _load_geojson(self, path: str) -> None:
+        """Load GeoJSON world map."""
+        try:
+            with open(path) as f:
+                data = json.load(f)
+            
+            features = data.get('features', [])
+            for feature in features:
+                props = feature.get('properties', {})
+                name = props.get('name', props.get('NAME', 'Unknown'))
+                geometry = feature.get('geometry', {})
+                geom_type = geometry.get('type')
+                coords = geometry.get('coordinates', [])
+                
+                if geom_type == 'Polygon':
+                    self.countries.append({
+                        'name': name,
+                        'polygons': [coords]
+                    })
+                elif geom_type == 'MultiPolygon':
+                    self.countries.append({
+                        'name': name,
+                        'polygons': coords
+                    })
+            
+            self.loaded = True
+        except Exception as e:
+            print(f"Warning: Could not load GeoJSON from {path}: {e}")
+            self.loaded = False
+    
+    def draw(self, ax, land_color: str = "#1a4a1a", alpha: float = 0.7) -> None:
+        """Draw countries on matplotlib axes."""
+        if not self.loaded:
+            return
+        
+        for country in self.countries:
+            for polygon in country['polygons']:
+                # Polygon can be a list of rings (exterior + holes)
+                if len(polygon) > 0:
+                    # First ring is exterior
+                    ring = polygon[0] if isinstance(polygon[0][0], list) and len(polygon[0][0]) == 2 else polygon
+                    
+                    try:
+                        # Extract coordinates
+                        if isinstance(ring[0][0], list):
+                            # Nested list
+                            lons = [pt[0] for pt in ring[0]]
+                            lats = [pt[1] for pt in ring[0]]
+                        else:
+                            # Flat list of [lon, lat]
+                            lons = [pt[0] for pt in ring]
+                            lats = [pt[1] for pt in ring]
+                        
+                        ax.fill(lons, lats, color=land_color, alpha=alpha)
+                        ax.plot(lons, lats, color=land_color, alpha=alpha + 0.1, linewidth=0.3)
+                    except (IndexError, TypeError):
+                        # Skip malformed polygons
+                        pass
 
 
 class VideoRecorder:
@@ -103,6 +183,9 @@ class VideoRecorder:
         # Event tracking
         self.events: List[Dict] = []
         self.highlights: List[Dict] = []
+        
+        # World map from GeoJSON
+        self.world_map = WorldMap(self.config.geojson_path)
         
         # City coordinates for visualization
         self._cities = self._load_default_cities()
@@ -294,7 +377,7 @@ class VideoRecorder:
         return frame_path
     
     def _draw_globe(self, ax, frame: Frame) -> None:
-        """Draw the globe projection with detailed continents."""
+        """Draw the globe projection with detailed continents from GeoJSON."""
         # Background
         ax.set_xlim(-180, 180)
         ax.set_ylim(-90, 90)
@@ -308,6 +391,26 @@ class VideoRecorder:
             for lon in range(-180, 180, 30):
                 ax.axvline(lon, color=self.COLORS["grid"], alpha=0.3, linewidth=0.5)
         
+        # Draw world map from GeoJSON (if available)
+        if self.world_map.loaded:
+            self.world_map.draw(ax, land_color=self.COLORS["land"], alpha=0.7)
+        else:
+            # Fallback to simplified continents
+            self._draw_simple_continents(ax)
+        
+        # Draw cities
+        for city, (lat, lon) in self._cities.items():
+            ax.plot(lon, lat, 'o', color=self.COLORS["city"], markersize=4, alpha=0.7)
+            ax.text(lon + 2, lat + 2, city, color=self.COLORS["text"], 
+                   fontsize=6, alpha=0.5)
+        
+        # Draw launch sites
+        for site, (lat, lon) in self._launch_sites.items():
+            ax.plot(lon, lat, '^', color=self.COLORS["launch_site"], 
+                   markersize=5, alpha=0.7)
+    
+    def _draw_simple_continents(self, ax) -> None:
+        """Draw simplified continent shapes as fallback."""
         # Detailed continent outlines (simplified but recognizable)
         continents = {
             "north_america": [
@@ -367,17 +470,6 @@ class VideoRecorder:
             lats = [c[1] for c in coords]
             ax.fill(lons, lats, color=self.COLORS["land"], alpha=0.7)
             ax.plot(lons, lats, color=self.COLORS["land"], alpha=0.9, linewidth=0.5)
-        
-        # Draw cities
-        for city, (lat, lon) in self._cities.items():
-            ax.plot(lon, lat, 'o', color=self.COLORS["city"], markersize=4, alpha=0.7)
-            ax.text(lon + 2, lat + 2, city, color=self.COLORS["text"], 
-                   fontsize=6, alpha=0.5)
-        
-        # Draw launch sites
-        for site, (lat, lon) in self._launch_sites.items():
-            ax.plot(lon, lat, '^', color=self.COLORS["launch_site"], 
-                   markersize=5, alpha=0.7)
     
     def _draw_entities(self, ax, frame: Frame) -> None:
         """Draw missiles and interceptors."""
