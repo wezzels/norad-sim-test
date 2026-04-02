@@ -55,13 +55,15 @@ class Frame:
 
 
 class WorldMap:
-    """Loads and renders world map from GeoJSON."""
+    """Loads and renders world map from GeoJSON with background image caching."""
+    
+    _background_cache = {}  # Cache for background images by resolution
     
     def __init__(self, geojson_path: Optional[str] = None):
-        self.countries = []
+        self.simplified_polygons = []
         self.loaded = False
+        self._background_image = None
         
-        # Try to find GeoJSON file
         search_paths = [
             geojson_path,
             "/home/wez/stsgym-work/stsgym-maps/data/world.json",
@@ -71,67 +73,92 @@ class WorldMap:
         
         for path in search_paths:
             if path and os.path.exists(path):
-                self._load_geojson(path)
+                self._load_and_simplify_geojson(path)
                 break
     
-    def _load_geojson(self, path: str) -> None:
-        """Load GeoJSON world map."""
+    def _load_and_simplify_geojson(self, path: str) -> None:
+        """Load GeoJSON and aggressively simplify for fast rendering."""
         try:
             with open(path) as f:
                 data = json.load(f)
             
             features = data.get('features', [])
+            
             for feature in features:
-                props = feature.get('properties', {})
-                name = props.get('name', props.get('NAME', 'Unknown'))
                 geometry = feature.get('geometry', {})
                 geom_type = geometry.get('type')
                 coords = geometry.get('coordinates', [])
                 
+                # Aggressive simplification: keep every 20th point
+                step = 20
                 if geom_type == 'Polygon':
-                    self.countries.append({
-                        'name': name,
-                        'polygons': [coords]
-                    })
+                    self._add_simplified_polygon(coords, step)
                 elif geom_type == 'MultiPolygon':
-                    self.countries.append({
-                        'name': name,
-                        'polygons': coords
-                    })
+                    for poly in coords:
+                        self._add_simplified_polygon(poly, step)
             
             self.loaded = True
+            total_pts = sum(len(p[0]) for p in self.simplified_polygons)
+            print(f"WorldMap: {len(self.simplified_polygons)} polygons, {total_pts} points")
         except Exception as e:
-            print(f"Warning: Could not load GeoJSON from {path}: {e}")
-            self.loaded = False
+            print(f"Warning: Could not load GeoJSON: {e}")
+    
+    def _add_simplified_polygon(self, coords: list, step: int = 20) -> None:
+        """Add simplified polygon coordinates."""
+        if not coords or not coords[0]:
+            return
+        
+        ring = coords[0]
+        if isinstance(ring[0], list) and len(ring[0]) == 2:
+            simplified = ring[::step]
+            if len(simplified) < 3:
+                simplified = ring[:3] if len(ring) >= 3 else ring
+            self.simplified_polygons.append(([pt[0] for pt in simplified], [pt[1] for pt in simplified]))
     
     def draw(self, ax, land_color: str = "#1a4a1a", alpha: float = 0.7) -> None:
-        """Draw countries on matplotlib axes."""
+        """Draw simplified world map."""
         if not self.loaded:
             return
         
-        for country in self.countries:
-            for polygon in country['polygons']:
-                # Polygon can be a list of rings (exterior + holes)
-                if len(polygon) > 0:
-                    # First ring is exterior
-                    ring = polygon[0] if isinstance(polygon[0][0], list) and len(polygon[0][0]) == 2 else polygon
-                    
-                    try:
-                        # Extract coordinates
-                        if isinstance(ring[0][0], list):
-                            # Nested list
-                            lons = [pt[0] for pt in ring[0]]
-                            lats = [pt[1] for pt in ring[0]]
-                        else:
-                            # Flat list of [lon, lat]
-                            lons = [pt[0] for pt in ring]
-                            lats = [pt[1] for pt in ring]
-                        
-                        ax.fill(lons, lats, color=land_color, alpha=alpha)
-                        ax.plot(lons, lats, color=land_color, alpha=alpha + 0.1, linewidth=0.3)
-                    except (IndexError, TypeError):
-                        # Skip malformed polygons
-                        pass
+        for lons, lats in self.simplified_polygons:
+            if len(lons) >= 3:
+                ax.fill(lons, lats, color=land_color, alpha=alpha, linewidth=0)
+                ax.plot(lons, lats, color=land_color, alpha=min(1.0, alpha + 0.2), linewidth=0.2)
+    
+    def get_background(self, resolution: Tuple[int, int], land_color: str = "#1a4a1a", 
+                       bg_color: str = "#0a0a1a") -> str:
+        """Get or create cached background image for world map."""
+        cache_key = f"{resolution[0]}x{resolution[1]}_{land_color}_{bg_color}"
+        
+        if cache_key in WorldMap._background_cache:
+            return WorldMap._background_cache[cache_key]
+        
+        # Create background image
+        import tempfile
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+        
+        width, height = resolution
+        dpi = 100
+        fig = plt.figure(figsize=(width/dpi, height/dpi), dpi=dpi)
+        ax = fig.add_axes([0, 0, 1, 1])
+        ax.set_xlim(-180, 180)
+        ax.set_ylim(-90, 90)
+        ax.set_facecolor(bg_color)
+        ax.axis('off')
+        
+        # Draw world map
+        self.draw(ax, land_color=land_color, alpha=0.8)
+        
+        # Save to temp file
+        fd, path = tempfile.mkstemp(suffix='.png', prefix='world_bg_')
+        os.close(fd)
+        plt.savefig(path, facecolor=bg_color, dpi=dpi, pad_inches=0)
+        plt.close(fig)
+        
+        WorldMap._background_cache[cache_key] = path
+        return path
 
 
 class VideoRecorder:
@@ -186,6 +213,9 @@ class VideoRecorder:
         
         # World map from GeoJSON
         self.world_map = WorldMap(self.config.geojson_path)
+        
+        # Background image cache (for fast frame rendering)
+        self._background_image_path: Optional[str] = None
         
         # City coordinates for visualization
         self._cities = self._load_default_cities()
@@ -325,6 +355,16 @@ class VideoRecorder:
         # Create temp directory for frames
         self.temp_dir = tempfile.mkdtemp(prefix="norad_video_")
         
+        # Pre-render background if using GeoJSON
+        if self.world_map.loaded:
+            print("  Pre-rendering world map background...")
+            self._background_image_path = self.world_map.get_background(
+                self.config.resolution,
+                land_color=self.COLORS["land"],
+                bg_color=self.COLORS["background"]
+            )
+            print(f"  Background cached: {self._background_image_path}")
+        
         # Render frames
         frame_files = []
         for i, frame in enumerate(self.frames):
@@ -339,7 +379,7 @@ class VideoRecorder:
         self._cleanup()
         
         return video_path
-    
+
     def _render_frame(self, frame: Frame, index: int) -> Optional[str]:
         """Render a single frame to image."""
         if not HAS_MATPLOTLIB:
@@ -384,19 +424,29 @@ class VideoRecorder:
         ax.set_aspect('equal')
         ax.set_facecolor(self.COLORS["background"])
         
+        # Draw pre-rendered world map background (if available)
+        if self._background_image_path and os.path.exists(self._background_image_path):
+            # Load and display background image
+            import matplotlib.image as mpimg
+            try:
+                img = mpimg.imread(self._background_image_path)
+                ax.imshow(img, extent=[-180, 180, -90, 90], aspect='auto', alpha=1.0)
+            except Exception:
+                # Fall back to drawing
+                self._draw_world_polygons(ax)
+        elif self.world_map.loaded:
+            # No background cache, draw polygons
+            self._draw_world_polygons(ax)
+        else:
+            # Fallback to simplified continents
+            self._draw_simple_continents(ax)
+        
         # Grid lines
         if self.config.show_grid:
             for lat in range(-80, 90, 20):
                 ax.axhline(lat, color=self.COLORS["grid"], alpha=0.3, linewidth=0.5)
             for lon in range(-180, 180, 30):
                 ax.axvline(lon, color=self.COLORS["grid"], alpha=0.3, linewidth=0.5)
-        
-        # Draw world map from GeoJSON (if available)
-        if self.world_map.loaded:
-            self.world_map.draw(ax, land_color=self.COLORS["land"], alpha=0.7)
-        else:
-            # Fallback to simplified continents
-            self._draw_simple_continents(ax)
         
         # Draw cities
         for city, (lat, lon) in self._cities.items():
@@ -408,6 +458,10 @@ class VideoRecorder:
         for site, (lat, lon) in self._launch_sites.items():
             ax.plot(lon, lat, '^', color=self.COLORS["launch_site"], 
                    markersize=5, alpha=0.7)
+    
+    def _draw_world_polygons(self, ax) -> None:
+        """Draw world map polygons (slow, use background image when possible)."""
+        self.world_map.draw(ax, land_color=self.COLORS["land"], alpha=0.7)
     
     def _draw_simple_continents(self, ax) -> None:
         """Draw simplified continent shapes as fallback."""
